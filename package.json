@@ -3,11 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Drama Radar — trending topic scraper + internet drama curator for short-form creators",
+  "description": "Drama Radar \u2014 trending topic scraper + internet drama curator for short-form creators",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
     "dev:api": "node scripts/api-server.mjs",
+    "serve": "node scripts/serve.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "check": "node scripts/check.mjs"
