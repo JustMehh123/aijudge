@@ -1,14 +1,12 @@
 /**
  * llm.js — turns a pile of raw trending headlines into N curated story cards.
  *
- * Providers (use whichever key exists):
- *   - openrouter (OPENROUTER_API_KEY)  — preferred; can auto-pick a FREE model
- *   - openai     (OPENAI_API_KEY)
- *   - anthropic  (ANTHROPIC_API_KEY)
+ * One provider: OpenRouter (OPENROUTER_API_KEY). It is OpenAI-compatible and its
+ * free tier is good enough for this, so there is nothing to configure.
  *
- * Nothing about the model choice is hardcoded to a version: for OpenRouter we ask
- * /api/v1/models which ":free" models exist right now and rank them on objective
- * metadata, so this keeps working as the free tier changes.
+ * The model is never hardcoded to a version: we ask /api/v1/models which ":free"
+ * models exist right now and rank them on objective metadata, so this keeps
+ * working as the free roster changes.
  */
 
 export const CATEGORIES = ['viral', 'creator', 'gaming', 'tech', 'entertainment', 'world', 'money', 'sports', 'science', 'bizarre']
@@ -82,34 +80,29 @@ Now return the ${limit} stories as JSON.`
 }
 
 /* ------------------------------------------------------------------ */
-/* provider resolution                                                 */
+/* provider: OpenRouter, and only OpenRouter                           */
 /* ------------------------------------------------------------------ */
 
-const DEFAULTS = {
-  openrouter: { keyEnv: 'OPENROUTER_API_KEY', model: null, url: 'https://openrouter.ai/api/v1/chat/completions' },
-  openai: { keyEnv: 'OPENAI_API_KEY', model: 'gpt-4o-mini', url: 'https://api.openai.com/v1/chat/completions' },
-  anthropic: { keyEnv: 'ANTHROPIC_API_KEY', model: 'claude-3-5-haiku-20241022', url: 'https://api.anthropic.com/v1/messages' }
+export const OPENROUTER = {
+  keyEnv: 'OPENROUTER_API_KEY',
+  chatUrl: 'https://openrouter.ai/api/v1/chat/completions',
+  modelsUrl: 'https://openrouter.ai/api/v1/models'
 }
 
-export const PROVIDERS = DEFAULTS
-
-/** Which provider is usable, and where the key came from. */
-export function resolveProvider ({ provider, apiKey, model } = {}, env = {}) {
-  const order = provider && DEFAULTS[provider] ? [provider] : ['openrouter', 'openai', 'anthropic']
-  for (const id of order) {
-    const key = apiKey || env[DEFAULTS[id].keyEnv]
-    if (key && key.length > 8) {
-      return {
-        id,
-        key,
-        // precedence: explicit request > DRAMA_RADAR_MODEL > provider default > null (auto-pick)
-        model: model || env.DRAMA_RADAR_MODEL || DEFAULTS[id].model,
-        url: DEFAULTS[id].url,
-        keySource: apiKey ? 'request' : 'env'
-      }
-    }
+/**
+ * Resolve the OpenRouter key. A key pasted in the browser wins over the server
+ * env var, so you can test someone else's key without redeploying.
+ * Returns null when nothing is configured -> the app serves the demo batch.
+ */
+export function resolveOpenRouter ({ apiKey } = {}, env = {}) {
+  const key = apiKey || env[OPENROUTER.keyEnv]
+  if (!key || key.length <= 8) return null
+  return {
+    key,
+    // explicit request/env override, else null => auto-pick the best free model
+    model: env.DRAMA_RADAR_MODEL || null,
+    keySource: apiKey ? 'request' : 'env'
   }
-  return null
 }
 
 /* ------------------------------------------------------------------ */
@@ -178,7 +171,7 @@ export async function discoverFreeModels ({ apiKey, force = false, timeoutMs = 1
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/models', {
+    const res = await fetch(OPENROUTER.modelsUrl, {
       signal: ctrl.signal,
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
     })
@@ -221,47 +214,35 @@ export async function pickFreeModel (opts) {
 export async function curateWithLLM ({ provider, models, candidates, hours, limit, category, timeoutMs = 55000 }) {
   const userPrompt = buildUserPrompt({ candidates, hours, limit, category })
 
-  if (provider.id === 'anthropic') {
-    const data = await postJSON(
-      provider.url,
-      { model: provider.model, max_tokens: 4000, system: SYSTEM_PROMPT, messages: [{ role: 'user', content: userPrompt }] },
-      {
-        timeoutMs,
-        headers: { 'x-api-key': provider.key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
-      }
-    )
-    return parseStories((data?.content || []).map(b => b?.text || '').join(''))
-  }
-
   const headers = {
     Authorization: `Bearer ${provider.key}`,
     'content-type': 'application/json',
-    ...(provider.id === 'openrouter'
-      ? { 'HTTP-Referer': 'https://github.com/JustMehh123/aijudge', 'X-Title': 'Drama Radar' }
-      : {})
+    // OpenRouter asks for attribution headers; they are optional but polite.
+    'HTTP-Referer': 'https://github.com/JustMehh123/aijudge',
+    'X-Title': 'Drama Radar'
   }
 
-  // Ask for JSON mode; some free models reject response_format with a 400, so
-  // retry once without it and lean on the tolerant parser instead.
   // OpenRouter accepts a `models` array and fails over between them inside a
   // SINGLE request. That matters on the free tier, where every attempt eats the
   // daily quota — a client-side retry loop could burn 5 requests per scrape.
   const list = Array.isArray(models) && models.length ? models : [provider.model]
   const base = {
-    ...(provider.id === 'openrouter' && list.length > 1
-      ? { models: list }
-      : { model: list[0] || provider.model }),
+    // More than one candidate -> hand OpenRouter the array and let it fail over
+    // inside a single request. Exactly one -> pin it.
+    ...(list.length > 1 ? { models: list } : { model: list[0] || provider.model }),
     temperature: 0.85,
     messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: userPrompt }]
   }
 
+  // Ask for JSON mode; some free models reject response_format with a 400, so
+  // retry once without it and lean on the tolerant parser instead.
   let data
   try {
-    data = await postJSON(provider.url, { ...base, response_format: { type: 'json_object' } }, { timeoutMs, headers })
+    data = await postJSON(OPENROUTER.chatUrl, { ...base, response_format: { type: 'json_object' } }, { timeoutMs, headers })
   } catch (err) {
     const msg = String(err?.message || err)
     if (!/response_format|400|json/i.test(msg)) throw err
-    data = await postJSON(provider.url, base, { timeoutMs, headers })
+    data = await postJSON(OPENROUTER.chatUrl, base, { timeoutMs, headers })
   }
   const stories = parseStories(data?.choices?.[0]?.message?.content || '')
   // With a models array the provider tells us which one actually answered.

@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
 import { parseRss, parseReddit, decodeEntities, parseDate, stripHtml, htmlToText, SOURCES, gatherCandidates } from '../src/server/feeds.js'
-import { parseStories, buildUserPrompt, resolveProvider, scoreFreeModel, SYSTEM_PROMPT, CATEGORIES } from '../src/server/llm.js'
+import { parseStories, buildUserPrompt, resolveOpenRouter, scoreFreeModel, SYSTEM_PROMPT, CATEGORIES, OPENROUTER } from '../src/server/llm.js'
 import { SEED_BATCH } from '../src/server/seed.js'
 import { storyToText } from '../src/format.js'
 import { spawnSync } from 'node:child_process'
@@ -249,18 +249,23 @@ async function main () {
     assert.match(SYSTEM_PROMPT, /Return ONLY valid minified JSON/)
   })
 
-  await test('resolveProvider: picks env key, then request key, else null', () => {
-    assert.equal(resolveProvider({}, {}), null)
-    assert.equal(resolveProvider({}, { OPENAI_API_KEY: 'sk-test-12345678' }).id, 'openai')
-    assert.equal(resolveProvider({ apiKey: 'sk-abc-123456789' }, {}).keySource, 'request')
-    assert.equal(resolveProvider({ provider: 'anthropic', apiKey: 'sk-ant-12345' }, {}).model, 'claude-3-5-haiku-20241022')
+  await test('resolveOpenRouter: env key, request key, else null', () => {
+    assert.equal(resolveOpenRouter({}, {}), null, 'no key -> null (demo mode)')
+    assert.equal(resolveOpenRouter({}, { OPENROUTER_API_KEY: 'sk-or-v1-12345678' }).keySource, 'env')
+    assert.equal(resolveOpenRouter({ apiKey: 'sk-or-v1-abcdef' }, {}).keySource, 'request')
+    assert.equal(resolveOpenRouter({}, { OPENROUTER_API_KEY: 'short' }), null, 'too-short key rejected')
   })
 
-  await test('resolveProvider: model precedence is request > DRAMA_RADAR_MODEL > default', () => {
-    const env = { OPENAI_API_KEY: 'sk-test-12345678', DRAMA_RADAR_MODEL: 'gpt-4o' }
-    assert.equal(resolveProvider({}, env).model, 'gpt-4o', 'env override should win over the default')
-    assert.equal(resolveProvider({ model: 'gpt-4.1-mini' }, env).model, 'gpt-4.1-mini', 'explicit request wins')
-    assert.equal(resolveProvider({}, { OPENAI_API_KEY: 'sk-test-12345678' }).model, 'gpt-4o-mini', 'default')
+  await test('resolveOpenRouter: DRAMA_RADAR_MODEL pins the model, else null means auto-pick', () => {
+    const key = { OPENROUTER_API_KEY: 'sk-or-v1-12345678' }
+    assert.equal(resolveOpenRouter({}, key).model, null, 'no override -> auto-pick')
+    assert.equal(resolveOpenRouter({}, { ...key, DRAMA_RADAR_MODEL: 'test/pinned:free' }).model, 'test/pinned:free')
+  })
+
+  await test('OpenRouter is the only provider wired up', () => {
+    assert.equal(OPENROUTER.keyEnv, 'OPENROUTER_API_KEY')
+    assert.match(OPENROUTER.chatUrl, /^https:\/\/openrouter\.ai\//)
+    assert.match(OPENROUTER.modelsUrl, /^https:\/\/openrouter\.ai\//)
   })
 
   await test('seed batch: 5 stories, all fields present, hooks are distinct', () => {
@@ -347,14 +352,16 @@ async function main () {
     assert.equal(res.status, 200)
     assert.equal(res.json.ok, true)
     assert.equal(res.json.mode, 'demo')
-    assert.ok(res.json.sources >= 20)
+    assert.equal(res.json.provider, 'openrouter')
+    assert.equal(res.json.keySet, false)
+    assert.ok(res.json.sources >= 100)
   })
 
   await test('GET /api/models explains itself when there is no OpenRouter key', async () => {
     const res = await invoke({ method: 'GET', url: '/api/models' })
     assert.equal(res.status, 200)
     assert.equal(res.json.ok, false)
-    assert.match(res.json.notice, /OpenRouter/)
+    assert.match(res.json.notice, /OPENROUTER_API_KEY/)
   })
 
   await test('POST /api/scrape returns the demo batch when no key is configured', async () => {
@@ -425,13 +432,13 @@ async function main () {
     try {
       const res = await invoke({
         method: 'POST', url: '/api/scrape',
-        body: { hours: 48, limit: 5, apiKey: 'sk-or-v1-bogus-key-0000000', provider: 'openrouter', force: true }
+        body: { hours: 48, limit: 5, apiKey: 'sk-or-v1-bogus-key-0000000', force: true }
       })
       assert.equal(res.status, 200, `expected graceful 200, got ${res.status}`)
       assert.equal(res.json.ok, false)
       assert.equal(res.json.raw, true, 'should be flagged as a raw scrape')
       assert.ok(res.json.candidateCount > 0, `expected scraped candidates, got ${res.json.candidateCount}`)
-      assert.match(res.json.notice, /key was rejected/i)
+      assert.match(res.json.notice, /OpenRouter rejected the key/i)
       // The stories must be the scraped ones, NOT the bundled demo batch.
       const titles = res.json.stories.map(s => s.topicTitle).join(' | ')
       assert.match(titles, /Streamer banned mid-stream|Game studio patches/i)
@@ -464,7 +471,7 @@ async function main () {
     try {
       const res = await invoke({
         method: 'POST', url: '/api/scrape',
-        body: { hours: 48, limit: 5, apiKey: 'sk-or-v1-good-key-0000000', provider: 'openrouter', force: true }
+        body: { hours: 48, limit: 5, apiKey: 'sk-or-v1-good-key-0000000', force: true }
       })
       assert.equal(res.json.ok, true, `expected success, notice: ${res.json.notice}`)
       assert.equal(res.json.mode, 'live')
@@ -500,7 +507,7 @@ async function main () {
     try {
       const res = await invoke({
         method: 'POST', url: '/api/scrape',
-        body: { hours: 48, limit: 5, category: 'world', apiKey: 'sk-or-v1-good-key-000', provider: 'openrouter', force: true }
+        body: { hours: 48, limit: 5, category: 'world', apiKey: 'sk-or-v1-good-key-000', force: true }
       })
       assert.equal(res.json.ok, true, res.json.notice)
       assert.equal(chatCalls, 1, `expected exactly 1 chat request, made ${chatCalls}`)
@@ -537,7 +544,7 @@ async function main () {
     try {
       const res = await invoke({
         method: 'POST', url: '/api/scrape',
-        body: { hours: 48, limit: 5, category: 'world', apiKey: 'sk-or-v1-good-key-000', provider: 'openrouter', force: true }
+        body: { hours: 48, limit: 5, category: 'world', apiKey: 'sk-or-v1-good-key-000', force: true }
       })
       assert.equal(res.status, 200)
       assert.equal(res.json.ok, false)

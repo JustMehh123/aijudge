@@ -11,7 +11,7 @@
  */
 import { loadEnv } from '../src/server/env.js'
 import { gatherCandidates, SOURCES } from '../src/server/feeds.js'
-import { curateWithLLM, resolveProvider, discoverFreeModels, pickFreeModel, PROVIDERS, parseStories, CATEGORIES } from '../src/server/llm.js'
+import { curateWithLLM, resolveOpenRouter, discoverFreeModels, pickFreeModel, parseStories, CATEGORIES, OPENROUTER } from '../src/server/llm.js'
 import { SEED_BATCH } from '../src/server/seed.js'
 
 // Must run before anything reads process.env. feeds.js and llm.js only read env
@@ -64,19 +64,19 @@ export default async function handler (req, res) {
 /* ------------------------------------------------------------------ */
 
 async function handleHealth (req, res) {
-  const provider = resolveProvider({}, process.env)
+  const router = resolveOpenRouter({}, process.env)
   const payload = {
     ok: true,
     runtime: typeof EdgeRuntime !== 'undefined' ? 'edge' : 'node',
     sources: SOURCES.length,
     categories: CATEGORIES,
-    mode: provider ? 'live' : 'demo',
-    provider: provider ? provider.id : null,
-    model: provider ? provider.model : null,
-    autoModel: Boolean(provider && !provider.model),
-    keySource: provider ? provider.keySource : null,
-    providers: Object.keys(PROVIDERS),
-    env: Object.keys(PROVIDERS).map(id => ({ id, set: Boolean(process.env[PROVIDERS[id].keyEnv]) })),
+    provider: 'openrouter',
+    mode: router ? 'live' : 'demo',
+    keySet: Boolean(router),
+    model: router ? router.model : null,
+    autoModel: Boolean(router && !router.model),
+    keySource: router ? router.keySource : null,
+    env: [{ id: 'openrouter', set: Boolean(process.env[OPENROUTER.keyEnv]) }],
     time: new Date().toISOString()
   }
 
@@ -93,16 +93,16 @@ async function handleHealth (req, res) {
 }
 
 async function handleModels (req, res) {
-  const provider = resolveProvider({}, process.env)
-  if (!provider || provider.id !== 'openrouter') {
+  const router = resolveOpenRouter({}, process.env)
+  if (!router) {
     return sendJSON(res, 200, {
       ok: false,
-      notice: 'Free-model discovery needs an OpenRouter key (OPENROUTER_API_KEY).'
+      notice: 'Set OPENROUTER_API_KEY to list the free models.'
     })
   }
   try {
     const { models, cached, totalScanned } = await discoverFreeModels({
-      apiKey: provider.key,
+      apiKey: router.key,
       force: /[?&]refresh=1/.test(req.url || '')
     })
     return sendJSON(res, 200, { ok: true, count: models.length, cached, totalScanned, models: models.slice(0, 25) })
@@ -117,10 +117,9 @@ async function handleScrape (res, body) {
   const category = CATEGORIES.includes(body.category) || body.category === 'all' ? body.category : 'all'
   const force = Boolean(body.force)
 
-  const provider = resolveProvider(
-    { provider: body.provider, apiKey: body.apiKey, model: body.model },
-    process.env
-  )
+  // A key pasted in the browser overrides the server env var for that request.
+  const provider = resolveOpenRouter({ apiKey: body.apiKey }, process.env)
+  if (body.model) provider && (provider.model = body.model)
 
   /* ---------- DEMO MODE: no key configured, still fully usable ---------- */
   if (!provider) {
@@ -172,33 +171,25 @@ async function handleScrape (res, body) {
   let modelAuto = false
   if (provider.model) {
     modelCandidates.push(provider.model)
-  } else if (provider.id === 'openrouter') {
+  } else {
+    // No model pinned -> ask OpenRouter what is free right now, then keep a
+    // short fallback list so a blocked /models endpoint cannot dead-end us.
     modelAuto = true
     const best = await pickFreeModel({ apiKey: provider.key })
     if (best) modelCandidates.push(best.id)
     for (const m of FALLBACK_FREE_MODELS) if (!modelCandidates.includes(m)) modelCandidates.push(m)
   }
 
-  if (!modelCandidates.length) {
-    return sendJSON(res, 200, {
-      ok: false, mode: 'live', provider: provider.id, ...meta,
-      notice: `The ${provider.id} provider needs an explicit model name. Set DRAMA_RADAR_MODEL, pick one in Settings, or use an OpenRouter key to auto-pick a free model. Raw scrape below.`,
-      stories: rawFallback(candidates, limit),
-      raw: true
-    })
-  }
-
-  const cacheKey = `${provider.id}|${modelCandidates[0]}|${hours}|${limit}|${category}`
+  const cacheKey = `openrouter|${modelCandidates[0]}|${hours}|${limit}|${category}`
   if (!force) {
     const hit = CACHE.get(cacheKey)
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return sendJSON(res, 200, { ...hit.payload, cached: true })
   }
 
   /* ---------- curate ----------
-   * OpenRouter gets the whole candidate list in ONE request and fails over
-   * internally, so iterating again would just re-spend the same free quota.
-   * Other providers only ever have one model, so the loop is a no-op there too. */
-  const attempts = provider.id === 'openrouter' ? [modelCandidates[0]] : modelCandidates
+   * The whole candidate list goes in ONE request and OpenRouter fails over
+   * internally, so iterating again would just re-spend the same free quota. */
+  const attempts = [modelCandidates[0]]
   let lastError = ''
   let ranOutOfTime = false
   for (const model of attempts) {
@@ -210,13 +201,13 @@ async function handleScrape (res, body) {
         provider: { ...provider, model },
         // Hand the whole list to OpenRouter so it fails over in ONE request
         // instead of us spending one quota unit per attempt.
-        models: provider.id === 'openrouter' ? modelCandidates : [model],
+        models: modelCandidates,
         candidates, hours, limit, category,
         timeoutMs: remaining - 2000 // leave room to serialise and respond
       })
       if (!stories.length) throw new Error('Model returned zero usable stories')
       const payload = {
-        ok: true, mode: 'live', provider: provider.id, model: stories.modelUsed || model, modelAuto,
+        ok: true, mode: 'live', provider: 'openrouter', model: stories.modelUsed || model, modelAuto,
         notice: null, ...meta, stories: stories.slice(0, limit)
       }
       CACHE.set(cacheKey, { at: Date.now(), payload })
@@ -231,9 +222,9 @@ async function handleScrape (res, body) {
 
   const keyProblem = /401|403|invalid api key|invalid_api_key|credit|billing|quota|permission/i.test(lastError)
   return sendJSON(res, 200, {
-    ok: false, mode: 'live', provider: provider.id, model: modelCandidates[0], modelAuto, ...meta,
+    ok: false, mode: 'live', provider: 'openrouter', model: modelCandidates[0], modelAuto, ...meta,
     notice: keyProblem
-      ? `Your ${provider.id} key was rejected (${lastError}). Check it in Settings, or clear it to fall back to demo mode. Raw scrape below.`
+      ? `OpenRouter rejected the key (${lastError}). Check it in Settings, or clear it to fall back to demo mode. Raw scrape below.`
       : ranOutOfTime
         ? `Ran out of the ${Math.round(budgetMs() / 1000)}s request budget before a model could finish. Raise DRAMA_RADAR_BUDGET_MS (locally) or ask for fewer stories. Raw scrape below.`
         : `No model could curate this batch (${lastError}). Showing raw scraped candidates instead — pin a model name in Settings to fix it.`,

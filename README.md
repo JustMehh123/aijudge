@@ -25,93 +25,107 @@ npm run dev
 
 Open **http://localhost:5173** → hit **⚡ SCRAPE NEW BATCH**.
 
-That's it. It works with **zero configuration** — no API key, no `.env`, no accounts.
+It runs with **zero configuration** — no key, no `.env`, no accounts. Add a key to go live.
 
-> `npm run dev` starts two things: the API on `:8787` and the Vite frontend on `:5173`
-> (Vite proxies `/api` to the API). If you'd rather run them separately:
-> `npm run dev:api` and `npm run dev:web`.
-
----
-
-## Two modes
-
-### 🟡 Demo mode (default, zero setup)
-No key configured → the app serves a hand-curated batch so everything is usable immediately.
-Good for trying the UI, the copy buttons and the output format.
-
-### 🟢 Live mode (one env var)
-
-`OPENROUTER_API_KEY` is the recommended one — it is already set in `.env` here.
-
-```bash
-npm run dev      # .env is loaded automatically
-```
-
-**Leave the model field blank and it picks the best FREE model for you.** The app queries
-`https://openrouter.ai/api/v1/models`, keeps the `:free` ones, and ranks them on *objective*
-metadata — structured-output support, context window, recency — with model family as a mere
-tiebreaker. Nothing is hardcoded to a version, so it keeps working as the free tier rotates.
-The list is cached 6h. **⚙️ Settings → 🔍 LIST FREE MODELS** shows the ranking live and lets you
-pin one.
-
-Other providers also work, but need an explicit model name:
-
-| Variable | Where to get it | Default model |
-| --- | --- | --- |
-| `OPENROUTER_API_KEY` | openrouter.ai/keys | *(auto — best free)* |
-| `OPENAI_API_KEY` | platform.openai.com/api-keys | `gpt-4o-mini` |
-| `ANTHROPIC_API_KEY` | console.anthropic.com | `claude-3-5-haiku-20241022` |
-
-You can also paste a key into **⚙️ Settings** — it stays in your browser's localStorage and is
-sent only with your own requests. For a shared deploy, set the env var in the Vercel dashboard
-instead and leave that field blank.
-
-**The scraping itself needs no key at all.** The LLM is only the curation step, so the app always
-scrapes first: a dead key, an unreachable model list, or a model that returns garbage all still
-leave you looking at the real scraped headlines instead of an error page.
+> `npm run dev` starts two things: the API on `:8787` and Vite on `:5173` (Vite proxies `/api`).
+> Separately if you prefer: `npm run dev:api` and `npm run dev:web`.
+> `npm run serve` does the same with the **production** build — closest match to Vercel.
 
 ---
 
 ## Deploy to Vercel
 
+Five steps, about three minutes. One environment variable.
+
+**1. Get the code on GitHub.** If it isn't already:
+
+```bash
+git remote add origin https://github.com/<you>/aijudge.git
+git push -u origin main
+```
+
+**2. Import it.** Go to [vercel.com/new](https://vercel.com/new), pick the repo. Vercel detects
+Vite automatically — `vercel.json` already pins the build command, output directory and the `/api`
+rewrite, so **leave every build setting alone**.
+
+**3. Add the one environment variable.** Before or after the first deploy:
+**Project → Settings → Environment Variables**, then
+
+| Name | Value | Environment |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | `sk-or-v1-…` (your key) | Production ✅ Preview ✅ Development ✅ |
+
+That is the only required variable. Get a key free at [openrouter.ai/keys](https://openrouter.ai/keys).
+
+**4. Deploy** (or hit **Redeploy** if you added the variable after the first build — env vars are
+baked in at build time, so a redeploy is required).
+
+**5. Check it.** Open your URL, hit **⚡ SCRAPE NEW BATCH**. The badge should read `LIVE`. If it
+says `DEMO`, the variable didn't take — confirm the name is exactly `OPENROUTER_API_KEY` and that
+you redeployed.
+
+Sanity-check the deployment without the UI: `/api/health` should return
+`"mode":"live","keySet":true,"sources":129`, and `/api/models` lists the free models it can pick.
+
+### Optional variables
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `DRAMA_RADAR_MODEL` | *(blank = auto-pick best free)* | Pin a specific model |
+| `DRAMA_RADAR_BUDGET_MS` | `52000` | Wall-clock budget per scrape. Keep under Vercel's 60s. |
+| `DRAMA_RADAR_DEADLINE_MS` | `20000` | Max time for the feed-fetch phase |
+
+### Command line instead of the dashboard
+
 ```bash
 npm i -g vercel
+vercel env add OPENROUTER_API_KEY production   # paste the key when prompted
 vercel --prod
 ```
 
-Vercel auto-detects Vite (`vercel.json` pins it). Then **Project → Settings → Environment
-Variables** → add `OPENAI_API_KEY` → redeploy.
+---
 
-Or one-click: push this repo to GitHub and import it at vercel.com/new. No build settings to
-touch — `buildCommand`, `outputDirectory` and the `/api` rewrite are already in `vercel.json`.
+## How the AI side works
+
+One provider: **OpenRouter**. It is OpenAI-compatible and its free tier covers this app, so there
+is nothing to choose and nothing to pay.
+
+**Leave the model blank and it picks the best FREE model for you.** The app queries
+`https://openrouter.ai/api/v1/models`, keeps the `:free` ones, and ranks them on *objective*
+metadata — structured-output support, context window, recency — with model family as a mere
+tiebreaker. Nothing is hardcoded to a model version, so it keeps working as the free roster
+rotates. Re-ranked every 6 hours. **⚙️ Settings → 🔍 LIST FREE MODELS** shows the ranking live and
+lets you pin one.
+
+If a specific model is unavailable, the whole candidate list goes to OpenRouter in **one** request
+and it fails over internally — so a bad day costs one unit of free quota, not five.
+
+**The scraping itself needs no key at all.** The app always scrapes before it curates, so a dead
+key, an unreachable model list, or a model that returns garbage all still leave you looking at the
+real scraped headlines instead of an error page.
 
 ---
 
-## Deploying to Vercel: what to actually expect
+## Vercel: what to expect once it's live
 
-Yes, it works — with three constraints worth knowing before you click deploy.
+Three constraints worth knowing.
 
-**1. Function duration.** `vercel.json` sets `maxDuration: 60`, which is the ceiling the Hobby
-plan allows. The code self-limits to a **52s budget** (`DRAMA_RADAR_BUDGET_MS`): scraping gets
-18.2s, the model gets the rest, and if the budget runs out you get raw scraped cards instead of a
-504. Locally you can raise it freely since nothing kills the process.
+**1. Function duration.** `vercel.json` sets `maxDuration: 60`, the ceiling Hobby allows. The code
+self-limits to a **52s budget** (`DRAMA_RADAR_BUDGET_MS`): scraping gets 18.2s, the model gets the
+rest, and running out returns raw scraped cards rather than a 504. Locally you can raise it.
 
-**2. OpenRouter free-tier rate limits.** Free (`:free`) models are capped at **20 requests per
-minute and ~50 requests per day**; a one-time $10 credit purchase raises the daily cap to 1,000
-and that unlock is permanent. Each scrape is **one** request — the app sends the whole fallback
-model list to OpenRouter in a single call and lets it fail over internally, rather than retrying
-client-side and spending five units of quota on a bad day. So: roughly 50 scrapes/day on an
-unfunded account, which is plenty for one person making a few Shorts a day.
+**2. OpenRouter free-tier rate limits.** Free (`:free`) models are capped at **20 requests/minute
+and ~50 requests/day**; a one-time $10 credit purchase raises the daily cap to 1,000 permanently.
+Each scrape is **one** request, so that's ~50 scrapes/day on an unfunded key — plenty for one
+person making a few Shorts a day.
 
 **3. Reddit may block Vercel's IPs.** 64 of the 129 sources are Reddit JSON endpoints, and Reddit
-is known to reject datacenter IPs and unauthenticated API access. **This is unverified** — it
-depends on their current policy and cannot be tested from a sandbox. If it happens you'll see
-`Reached 65/129 trending sources` and still get a full batch from the 53 RSS/Atom feeds and 12
-Google News searches, which don't block cloud traffic. Every card names its source, so you'll be
-able to tell which half went quiet.
+is known to reject datacenter IPs. **This is unverified** — it depends on their current policy. If
+it happens you'll see `Reached 65/129 trending sources` and still get a full batch from the 53
+RSS/Atom feeds and 12 Google News searches. Every card names its source, so you'll be able to tell
+which half went quiet.
 
-Everything else — the build, the `/api` routing, the static hosting, the env var — is
-straightforward and needs no configuration beyond adding `OPENROUTER_API_KEY`.
+---
 
 ## What it scrapes
 
@@ -148,7 +162,7 @@ npm run preview   # serve the production build locally
 ```
 
 `npm run check` needs no network — 42 checks. It exercises the RSS/Atom/Reddit parsers, the model-output
-parser (including fenced and malformed responses), the prompt builder, provider resolution, the
+parser (including fenced and malformed responses), the prompt builder, key resolution, the
 seed batch, and the `/api` route handler end-to-end over fake request/response pairs. Two of them
 stub `fetch` to drive the full scrape → free-model-pick → curate path, and the full scrape →
 rejected-key → raw-fallback path, so both branches are actually executed rather than assumed.
@@ -159,7 +173,7 @@ Another spawns a child process to prove `.env` really reaches `process.env`.
 ```
 api/index.js            the whole backend (Vite dev + Vercel serverless, same file)
 src/server/feeds.js     129 sources + RSS/Atom/Reddit parsers (no dependencies)
-src/server/llm.js       system prompt, 3 providers, free-model ranking, output normalisation
+src/server/llm.js       system prompt, OpenRouter client, free-model ranking, output normalisation
 src/server/env.js       zero-dep .env loader (plain Node does not read .env on its own)
 src/server/seed.js      the zero-config demo batch
 src/App.jsx             UI
@@ -172,9 +186,9 @@ scripts/check.mjs       self-tests
 ### Endpoints
 
 ```
-GET  /api/health          mode, provider, source count, categories   (?feeds=1 probes all 129)
+GET  /api/health          mode, keySet, source count, categories     (?feeds=1 probes all 129)
 GET  /api/models          ranked free models on OpenRouter           (?refresh=1 busts the 6h cache)
-POST /api/scrape          { hours, limit, category, provider, apiKey, model, force }
+POST /api/scrape          { hours, limit, category, apiKey, model, force }
 ```
 
 ### Failure modes it handles

@@ -1,26 +1,5 @@
 import { useState } from 'react'
 
-const PROVIDER_INFO = {
-  openrouter: {
-    label: 'OpenRouter  ← recommended',
-    env: 'OPENROUTER_API_KEY',
-    defaultModel: '',
-    hint: 'Leave the model blank and it auto-picks the best FREE model on OpenRouter at runtime. One key, hundreds of models.'
-  },
-  openai: {
-    label: 'OpenAI',
-    env: 'OPENAI_API_KEY',
-    defaultModel: 'gpt-4o-mini',
-    hint: 'Paid. Needs an explicit model name.'
-  },
-  anthropic: {
-    label: 'Anthropic',
-    env: 'ANTHROPIC_API_KEY',
-    defaultModel: 'claude-3-5-haiku-20241022',
-    hint: 'Paid. Needs an explicit model name.'
-  }
-}
-
 export default function Settings ({ open, onClose, settings, onSave, health }) {
   const [draft, setDraft] = useState(settings)
   const [models, setModels] = useState(null)
@@ -29,14 +8,12 @@ export default function Settings ({ open, onClose, settings, onSave, health }) {
   if (!open) return null
 
   const set = (k, v) => setDraft(d => ({ ...d, [k]: v }))
-  const info = PROVIDER_INFO[draft.provider] || PROVIDER_INFO.openrouter
-  const envReady = health?.env?.find(e => e.id === draft.provider)?.set
+  const keyReady = health?.keySet || Boolean(draft.apiKey)
 
   const findFree = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/models?refresh=1')
-      const data = await res.json()
+      const data = await (await fetch('/api/models?refresh=1')).json()
       setModels(data)
     } catch (err) {
       setModels({ ok: false, notice: String(err?.message || err) })
@@ -48,38 +25,25 @@ export default function Settings ({ open, onClose, settings, onSave, health }) {
   return (
     <div className="backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <h3>⚙️ Curator settings</h3>
+        <h3>⚙️ Settings</h3>
         <p className="sub">
-          Optional. Without a key the app runs in demo mode with a bundled batch. With a key it scrapes
-          live trending feeds and writes the brief for you.
+          Runs on OpenRouter. Leave the model blank and it picks the best <b>free</b> one for you.
         </p>
 
         <div className="field">
-          <label>Provider</label>
-          <select value={draft.provider} onChange={e => set('provider', e.target.value)}>
-            {Object.entries(PROVIDER_INFO).map(([id, p]) => (
-              <option key={id} value={id}>{p.label}</option>
-            ))}
-          </select>
-          <span className="hint">
-            {info.hint} Server env var <code>{info.env}</code>
-            {envReady ? ' is set on this deployment ✅' : ' is not set on this deployment.'}
-          </span>
-        </div>
-
-        <div className="field">
-          <label>API key (optional)</label>
+          <label>OpenRouter API key</label>
           <input
             type="password"
             value={draft.apiKey}
-            placeholder={envReady ? `Using ${info.env} from the server — paste here to override` : 'sk-or-v1-...'}
+            placeholder={keyReady ? 'Server key in use — paste here to override' : 'sk-or-v1-...'}
             onChange={e => set('apiKey', e.target.value.trim())}
             autoComplete="off"
             spellCheck="false"
           />
           <span className="hint">
-            Stored in this browser's localStorage and sent to <code>/api/scrape</code> for that request only.
-            For a shared deploy set <code>{info.env}</code> in the Vercel dashboard and leave this blank.
+            {keyReady
+              ? <>A key is already live on this deployment (<code>{health?.keySource || 'env'}</code>). You only need to paste one to test a different key.</>
+              : <>No key on this deployment yet. Set <code>OPENROUTER_API_KEY</code> in Vercel, or paste one here — it stays in this browser's localStorage and is sent only with your own requests.</>}
           </span>
         </div>
 
@@ -87,22 +51,22 @@ export default function Settings ({ open, onClose, settings, onSave, health }) {
           <label>Model — blank = auto-pick best free</label>
           <input
             value={draft.model}
-            placeholder={draft.provider === 'openrouter' ? '(auto — best free model)' : info.defaultModel}
+            placeholder="(auto — best free model)"
             onChange={e => set('model', e.target.value.trim())}
             spellCheck="false"
           />
           <div className="row" style={{ marginTop: 6 }}>
-            {draft.provider === 'openrouter' && (
-              <button className="btn sm" onClick={findFree} disabled={loading}>
-                {loading ? 'LOADING…' : '🔍 LIST FREE MODELS'}
-              </button>
-            )}
+            <button className="btn sm" onClick={findFree} disabled={loading}>
+              {loading ? 'LOADING…' : '🔍 LIST FREE MODELS'}
+            </button>
             {draft.model && (
-              <button className="btn sm ghost" onClick={() => set('model', '')}>
-                clear → auto
-              </button>
+              <button className="btn sm ghost" onClick={() => set('model', '')}>clear → auto</button>
             )}
           </div>
+          <span className="hint">
+            The free roster rotates, so the app re-ranks it every 6 hours instead of trusting a
+            hardcoded model name. Free models are capped at ~50 requests/day per key.
+          </span>
         </div>
 
         {models && (
@@ -113,8 +77,8 @@ export default function Settings ({ open, onClose, settings, onSave, health }) {
             ) : (
               <>
                 <span className="hint">
-                  {models.count} free models found{models.cached ? ' (cached)' : ''}. Ranked on structured-output
-                  support, context window and recency — not on a hardcoded list, so this stays current.
+                  {models.count} free models{models.cached ? ' (cached)' : ''}, ranked on
+                  structured-output support, context window and recency.
                 </span>
                 <div className="model-list">
                   {(models.models || []).slice(0, 12).map((m, i) => (
@@ -139,13 +103,11 @@ export default function Settings ({ open, onClose, settings, onSave, health }) {
         )}
 
         <div className="row" style={{ marginTop: 18 }}>
-          <button className="btn primary" onClick={() => { onSave(draft); onClose() }}>
-            Save settings
-          </button>
+          <button className="btn primary" onClick={() => { onSave(draft); onClose() }}>Save</button>
           <button
             className="btn ghost"
             onClick={() => {
-              const cleared = { provider: 'openrouter', apiKey: '', model: '' }
+              const cleared = { apiKey: '', model: '' }
               setDraft(cleared)
               setModels(null)
               onSave(cleared)

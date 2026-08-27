@@ -20,7 +20,7 @@ const CATEGORIES = [
 const LS_SETTINGS = 'dramaradar.settings.v1'
 const LS_BATCH = 'dramaradar.batch.v1'
 
-const DEFAULT_SETTINGS = { provider: 'openrouter', apiKey: '', model: '' }
+const DEFAULT_SETTINGS = { apiKey: '', model: '' }
 
 function loadJSON (key, fallback) {
   try {
@@ -78,7 +78,6 @@ export default function App () {
             limit,
             category,
             force,
-            provider: settings.provider,
             apiKey: settings.apiKey || undefined,
             model: settings.model || undefined
           })
@@ -131,9 +130,9 @@ export default function App () {
             </div>
           </div>
 
-          <span className="pill" title={mode === 'live' ? 'LLM key detected' : 'No key — bundled batch'}>
+          <span className="pill" title={mode === 'live' ? 'OpenRouter key detected' : 'No key — bundled batch'}>
             <i className={`dot ${modeDot}`} />
-            {mode === 'live' ? `LIVE · ${batch?.provider || health?.provider || ''}` : 'DEMO'}
+            {mode === 'live' ? (batch?.model ? `LIVE · ${batch.model.replace(/^.*\//, '')}` : 'LIVE · openrouter') : 'DEMO'}
           </span>
 
           <button className="btn ghost sm" onClick={() => setShowSettings(true)}>⚙️ Settings</button>
@@ -210,6 +209,7 @@ export default function App () {
                   <span>·</span>
                   <span>
                     curated by <b>{batch.model}</b>
+                    {batch.modelAuto ? ' (auto)' : ''}
                   </span>
                 </>
               ) : null}
