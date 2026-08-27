@@ -218,7 +218,7 @@ export async function pickFreeModel (opts) {
 /* calls                                                               */
 /* ------------------------------------------------------------------ */
 
-export async function curateWithLLM ({ provider, candidates, hours, limit, category, timeoutMs = 55000 }) {
+export async function curateWithLLM ({ provider, models, candidates, hours, limit, category, timeoutMs = 55000 }) {
   const userPrompt = buildUserPrompt({ candidates, hours, limit, category })
 
   if (provider.id === 'anthropic') {
@@ -243,17 +243,30 @@ export async function curateWithLLM ({ provider, candidates, hours, limit, categ
 
   // Ask for JSON mode; some free models reject response_format with a 400, so
   // retry once without it and lean on the tolerant parser instead.
-  const base = { model: provider.model, temperature: 0.85, messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: userPrompt }] }
+  // OpenRouter accepts a `models` array and fails over between them inside a
+  // SINGLE request. That matters on the free tier, where every attempt eats the
+  // daily quota — a client-side retry loop could burn 5 requests per scrape.
+  const list = Array.isArray(models) && models.length ? models : [provider.model]
+  const base = {
+    ...(provider.id === 'openrouter' && list.length > 1
+      ? { models: list }
+      : { model: list[0] || provider.model }),
+    temperature: 0.85,
+    messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: userPrompt }]
+  }
 
+  let data
   try {
-    const data = await postJSON(provider.url, { ...base, response_format: { type: 'json_object' } }, { timeoutMs, headers })
-    return parseStories(data?.choices?.[0]?.message?.content || '')
+    data = await postJSON(provider.url, { ...base, response_format: { type: 'json_object' } }, { timeoutMs, headers })
   } catch (err) {
     const msg = String(err?.message || err)
     if (!/response_format|400|json/i.test(msg)) throw err
-    const data = await postJSON(provider.url, base, { timeoutMs, headers })
-    return parseStories(data?.choices?.[0]?.message?.content || '')
+    data = await postJSON(provider.url, base, { timeoutMs, headers })
   }
+  const stories = parseStories(data?.choices?.[0]?.message?.content || '')
+  // With a models array the provider tells us which one actually answered.
+  stories.modelUsed = typeof data?.model === 'string' && data.model ? data.model : (list[0] || provider.model)
+  return stories
 }
 
 async function postJSON (url, body, { timeoutMs, headers }) {

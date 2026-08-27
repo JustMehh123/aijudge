@@ -478,6 +478,97 @@ async function main () {
     }
   })
 
+  await test('OpenRouter failover happens in ONE request, not one per model (protects free quota)', async () => {
+    const realFetch = globalThis.fetch
+    let chatCalls = 0
+    let sentBody = null
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url)
+      const json = obj => ({ ok: true, status: 200, text: async () => JSON.stringify(obj), json: async () => obj })
+      if (u.includes('/api/v1/models')) {
+        return json({ data: [{ id: 'test/best:free', context_length: 128000, created: Math.floor(Date.now()/1000), supported_parameters: ['response_format'] }] })
+      }
+      if (u.includes('/chat/completions')) {
+        chatCalls++
+        sentBody = JSON.parse(opts.body)
+        return json({ model: 'test/best:free', choices: [{ message: { content: JSON.stringify({ stories: [
+          { topicTitle: 'ONE REQUEST', sourceContext: 'c', whyViral: 'w', hookA: 'a', hookB: 'b', category: 'tech' }
+        ] }) } }] })
+      }
+      return { ok: true, status: 200, text: async () => RSS_FIXTURE }
+    }
+    try {
+      const res = await invoke({
+        method: 'POST', url: '/api/scrape',
+        body: { hours: 48, limit: 5, category: 'world', apiKey: 'sk-or-v1-good-key-000', provider: 'openrouter', force: true }
+      })
+      assert.equal(res.json.ok, true, res.json.notice)
+      assert.equal(chatCalls, 1, `expected exactly 1 chat request, made ${chatCalls}`)
+      assert.ok(Array.isArray(sentBody.models), 'should send a models array, not a single model')
+      assert.ok(sentBody.models.length > 1, `expected fallbacks in the array, got ${JSON.stringify(sentBody.models)}`)
+      assert.equal(sentBody.model, undefined, 'should not also pin a single model')
+      assert.equal(res.json.model, 'test/best:free', 'should report the model that actually answered')
+      console.log(`      (1 request carrying ${sentBody.models.length} candidate models)`)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  /* ---------- the request budget must not let the function be killed ---------- */
+
+  await test('an exhausted request budget returns raw cards instead of hanging', async () => {
+    const realFetch = globalThis.fetch
+    const prevBudget = process.env.DRAMA_RADAR_BUDGET_MS
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      const json = obj => ({ ok: true, status: 200, text: async () => JSON.stringify(obj), json: async () => obj })
+      if (u.includes('/api/v1/models')) {
+        return json({ data: [{ id: 'test/best:free', context_length: 128000, created: Math.floor(Date.now()/1000), supported_parameters: ['response_format'] }] })
+      }
+      // A model that resolves fine — the only thing that should stop it is the budget.
+      if (u.includes('/chat/completions')) {
+        return json({ choices: [{ message: { content: JSON.stringify({ stories: [
+          { topicTitle: 'SHOULD NOT APPEAR', sourceContext: 'x', whyViral: 'y', hookA: 'a', hookB: 'b' }
+        ] }) } }] })
+      }
+      return { ok: true, status: 200, text: async () => RSS_FIXTURE }
+    }
+    process.env.DRAMA_RADAR_BUDGET_MS = '500' // far too small for the 9s minimum LLM allowance
+    try {
+      const res = await invoke({
+        method: 'POST', url: '/api/scrape',
+        body: { hours: 48, limit: 5, category: 'world', apiKey: 'sk-or-v1-good-key-000', provider: 'openrouter', force: true }
+      })
+      assert.equal(res.status, 200)
+      assert.equal(res.json.ok, false)
+      assert.equal(res.json.raw, true, 'must fall back to raw cards')
+      assert.match(res.json.notice, /Ran out of the \d+s request budget/)
+      assert.ok(res.json.candidateCount > 0, `expected candidates, got ${res.json.candidateCount}`)
+      const titles = res.json.stories.map(x => x.topicTitle).join(' | ')
+      assert.ok(!titles.includes('SHOULD NOT APPEAR'), 'the model result must not have been used')
+      console.log(`      (budget 500ms -> bailed before the LLM, kept ${res.json.candidateCount} raw candidates)`)
+    } finally {
+      globalThis.fetch = realFetch
+      if (prevBudget === undefined) delete process.env.DRAMA_RADAR_BUDGET_MS
+      else process.env.DRAMA_RADAR_BUDGET_MS = prevBudget
+    }
+  })
+
+  await test('the default budget fits inside Vercel Hobby maxDuration of 60s', async () => {
+    const prev = process.env.DRAMA_RADAR_BUDGET_MS
+    delete process.env.DRAMA_RADAR_BUDGET_MS
+    try {
+      // Mirror api/index.js: scrape gets 35% of the budget, the LLM gets the rest.
+      const budget = Number(process.env.DRAMA_RADAR_BUDGET_MS) || 52000
+      const scrape = Math.min(20000, Math.floor(budget * 0.35))
+      assert.ok(budget <= 60000, `budget ${budget}ms exceeds the 60s function ceiling`)
+      assert.ok(budget - scrape >= 9000, `LLM would only get ${budget - scrape}ms`)
+      assert.equal(scrape, 18200, 'scrape should be capped at 35% of 52s')
+    } finally {
+      if (prev !== undefined) process.env.DRAMA_RADAR_BUDGET_MS = prev
+    }
+  })
+
   /* ---------- report ---------- */
   console.log('')
   if (failures.length) {

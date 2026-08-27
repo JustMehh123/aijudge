@@ -23,6 +23,18 @@ loadEnv()
 const CACHE = new Map()
 const CACHE_TTL_MS = 10 * 60 * 1000
 
+/**
+ * Hard wall-clock budget for one /api/scrape request.
+ *
+ * Must stay under the platform's function limit or the request dies with a 504
+ * after all the work is already done. Vercel Hobby permits maxDuration up to 60s
+ * (vercel.json sets 60), so 52s leaves headroom for cold start and serialisation.
+ * Locally there is no limit, so this is only a safety ceiling.
+ */
+const budgetMs = () => Number(process.env.DRAMA_RADAR_BUDGET_MS) || 52000
+// Give up on further model attempts below this much remaining time.
+const MIN_LLM_MS = 9000
+
 // Tried in order only if OpenRouter's /models endpoint is unreachable, so a
 // blocked endpoint cannot dead-end the app. Long-standing free models first.
 const FALLBACK_FREE_MODELS = [
@@ -125,7 +137,13 @@ async function handleScrape (res, body) {
   }
 
   /* ---------- scrape first: this needs no LLM at all ---------- */
-  const gathered = await gatherCandidates({ hours, category, limitPerSource: 20 })
+  const startedAt = Date.now()
+  // Never let the scrape eat the whole budget — the LLM still has to run.
+  const scrapeDeadline = Math.min(
+    Number(process.env.DRAMA_RADAR_DEADLINE_MS) || 20000,
+    Math.floor(budgetMs() * 0.35)
+  )
+  const gathered = await gatherCandidates({ hours, category, limitPerSource: 20, deadlineMs: scrapeDeadline })
   const { candidates, diagnostics } = gathered
   const meta = {
     generatedAt: new Date().toISOString(),
@@ -176,14 +194,29 @@ async function handleScrape (res, body) {
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return sendJSON(res, 200, { ...hit.payload, cached: true })
   }
 
-  /* ---------- curate, trying each model in turn ---------- */
+  /* ---------- curate ----------
+   * OpenRouter gets the whole candidate list in ONE request and fails over
+   * internally, so iterating again would just re-spend the same free quota.
+   * Other providers only ever have one model, so the loop is a no-op there too. */
+  const attempts = provider.id === 'openrouter' ? [modelCandidates[0]] : modelCandidates
   let lastError = ''
-  for (const model of modelCandidates) {
+  let ranOutOfTime = false
+  for (const model of attempts) {
+    // Stop rather than start a call that cannot finish before the platform kills us.
+    const remaining = budgetMs() - (Date.now() - startedAt)
+    if (remaining < MIN_LLM_MS) { ranOutOfTime = true; break }
     try {
-      const stories = await curateWithLLM({ provider: { ...provider, model }, candidates, hours, limit, category })
+      const stories = await curateWithLLM({
+        provider: { ...provider, model },
+        // Hand the whole list to OpenRouter so it fails over in ONE request
+        // instead of us spending one quota unit per attempt.
+        models: provider.id === 'openrouter' ? modelCandidates : [model],
+        candidates, hours, limit, category,
+        timeoutMs: remaining - 2000 // leave room to serialise and respond
+      })
       if (!stories.length) throw new Error('Model returned zero usable stories')
       const payload = {
-        ok: true, mode: 'live', provider: provider.id, model, modelAuto,
+        ok: true, mode: 'live', provider: provider.id, model: stories.modelUsed || model, modelAuto,
         notice: null, ...meta, stories: stories.slice(0, limit)
       }
       CACHE.set(cacheKey, { at: Date.now(), payload })
@@ -201,7 +234,9 @@ async function handleScrape (res, body) {
     ok: false, mode: 'live', provider: provider.id, model: modelCandidates[0], modelAuto, ...meta,
     notice: keyProblem
       ? `Your ${provider.id} key was rejected (${lastError}). Check it in Settings, or clear it to fall back to demo mode. Raw scrape below.`
-      : `No model could curate this batch (${lastError}). Showing raw scraped candidates instead — pin a model name in Settings to fix it.`,
+      : ranOutOfTime
+        ? `Ran out of the ${Math.round(budgetMs() / 1000)}s request budget before a model could finish. Raise DRAMA_RADAR_BUDGET_MS (locally) or ask for fewer stories. Raw scrape below.`
+        : `No model could curate this batch (${lastError}). Showing raw scraped candidates instead — pin a model name in Settings to fix it.`,
     stories: rawFallback(candidates, limit),
     raw: true
   })

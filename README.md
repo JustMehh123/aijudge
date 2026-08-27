@@ -87,6 +87,32 @@ touch — `buildCommand`, `outputDirectory` and the `/api` rewrite are already i
 
 ---
 
+## Deploying to Vercel: what to actually expect
+
+Yes, it works — with three constraints worth knowing before you click deploy.
+
+**1. Function duration.** `vercel.json` sets `maxDuration: 60`, which is the ceiling the Hobby
+plan allows. The code self-limits to a **52s budget** (`DRAMA_RADAR_BUDGET_MS`): scraping gets
+18.2s, the model gets the rest, and if the budget runs out you get raw scraped cards instead of a
+504. Locally you can raise it freely since nothing kills the process.
+
+**2. OpenRouter free-tier rate limits.** Free (`:free`) models are capped at **20 requests per
+minute and ~50 requests per day**; a one-time $10 credit purchase raises the daily cap to 1,000
+and that unlock is permanent. Each scrape is **one** request — the app sends the whole fallback
+model list to OpenRouter in a single call and lets it fail over internally, rather than retrying
+client-side and spending five units of quota on a bad day. So: roughly 50 scrapes/day on an
+unfunded account, which is plenty for one person making a few Shorts a day.
+
+**3. Reddit may block Vercel's IPs.** 64 of the 129 sources are Reddit JSON endpoints, and Reddit
+is known to reject datacenter IPs and unauthenticated API access. **This is unverified** — it
+depends on their current policy and cannot be tested from a sandbox. If it happens you'll see
+`Reached 65/129 trending sources` and still get a full batch from the 53 RSS/Atom feeds and 12
+Google News searches, which don't block cloud traffic. Every card names its source, so you'll be
+able to tell which half went quiet.
+
+Everything else — the build, the `/api` routing, the static hosting, the env var — is
+straightforward and needs no configuration beyond adding `OPENROUTER_API_KEY`.
+
 ## What it scrapes
 
 **129 sources**, all public and keyless, spread across the whole internet:
