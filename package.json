@@ -1,0 +1,26 @@
+{
+  "name": "aijudge",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Drama Radar — trending topic scraper + internet drama curator for short-form creators",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
+    "dev:api": "node scripts/api-server.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "node scripts/check.mjs"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
